@@ -1,5 +1,6 @@
-#include <WinSock2.h>
+#ifdef win
 #include <WS2tcpip.h>
+#include <WinSock2.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -9,7 +10,7 @@
 int main() {
     struct WSAData winsock;
     int result = WSAStartup(MAKEWORD(2, 2), &winsock);
-    if (result != 0){
+    if (result != 0) {
         printf("Winsock startup failed: %d\n", result);
         return 1;
     }
@@ -48,7 +49,7 @@ int main() {
 
     freeaddrinfo(host_info);
 
-    if(listen(listen_socket, SOMAXCONN) == SOCKET_ERROR) {
+    if (listen(listen_socket, SOMAXCONN) == SOCKET_ERROR) {
         printf("Failed to listen on listen socket: %d\n", WSAGetLastError());
         closesocket(listen_socket);
         WSACleanup();
@@ -84,7 +85,7 @@ int main() {
             }
 
             printf("Sent %d bytes\n", send_result);
-        } else if (result == 0){
+        } else if (result == 0) {
             printf("Closing connection...\n");
         } else {
             printf("Failed to receive data from the client: %d\n", WSAGetLastError());
@@ -107,3 +108,4 @@ int main() {
 
     return 0;
 }
+#endif

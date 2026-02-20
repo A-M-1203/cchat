@@ -1,5 +1,6 @@
-#include <WinSock2.h>
+#ifdef win
 #include <WS2tcpip.h>
+#include <WinSock2.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -8,13 +9,13 @@
 
 int main(int argc, char** argv) {
     if (argc != 2) {
-       printf("Usage: %s <server_name>", argv[0]);
-       return 0;
+        printf("Usage: %s <server_name>", argv[0]);
+        return 0;
     }
 
     struct WSAData winsock;
     int result = WSAStartup(MAKEWORD(2, 2), &winsock);
-    if (result != 0){
+    if (result != 0) {
         printf("Winsock startup failed: %d\n", result);
         return 1;
     }
@@ -86,9 +87,10 @@ int main(int argc, char** argv) {
         } else {
             printf("Failed to receive data from the server: %d\n", WSAGetLastError());
         }
-    } while(result > 0);
+    } while (result > 0);
 
     closesocket(client_socket);
     WSACleanup();
     return 0;
 }
+#endif
