@@ -1,5 +1,4 @@
 #include <arpa/inet.h>
-#include <string.h>
 #include <unistd.h>
 
 #define CCN_AF_UNSPECIFIED AF_UNSPEC
@@ -21,108 +20,67 @@ typedef struct ccn_linux_socket {
     domain address_family;
     socket_type type;
     uint16_t port;
-    char ip_address[CCN_IP6_ADDRESS_LENGTH + 1];
+    char ip_address[CCN_IP6_ADDRESS_LENGTH + 2];
 } ccn_socket;
 
-static ccn_socket ccn_create_socket(domain address_family, socket_type type) {
-    ccn_socket socket_;
+static ccn_socket ccn_open_socket(domain address_family, socket_type type);
+static int32_t ccn_bind_socket(ccn_socket* socket_, const char* ip_address, uint16_t port);
+static ccn_socket ccn_open_server_socket(domain address_family, socket_type type,
+                                         const char* server_ip_address, uint16_t server_port);
+static int32_t ccn_connect(ccn_socket* socket_, const char* ip_address, uint16_t port);
+static int32_t ccn_listen(ccn_socket* listening_socket, int32_t backlog);
+static ccn_socket ccn_accept_connection(ccn_socket* listening_socket);
+static int64_t ccn_send(ccn_socket* socket_, const void* send_buffer, uint64_t send_buffer_length,
+                        int32_t flags);
+static int64_t ccn_receive(ccn_socket* socket_, void* receive_buffer,
+                           uint64_t receive_buffer_length, int32_t flags);
+static int32_t ccn_close_socket(ccn_socket* socket_);
+
+static uint32_t __ccn_ip_address_length(const char* ip_address);
+static void __ccn_copy_ip_address(ccn_socket* socket_, const char* ip_address,
+                                  uint8_t ip_address_length);
+static int32_t __ccn_get_socket_address_and_port(ccn_socket* socket_);
+static int32_t __ccn_get_sockaddr(struct sockaddr* socket_address, uint32_t* socket_address_size,
+                                  domain address_family, const char* ip_address, uint16_t port);
+static int32_t __ccn_set_client_address_and_port(ccn_socket* client_socket,
+                                                 const struct sockaddr* client_socket_address);
+
+ccn_socket ccn_open_socket(domain address_family, socket_type type) {
+    ccn_socket socket_ = {0};
     socket_.fd = socket(address_family, type, 0);
+    if (socket_.fd == -1) return (ccn_socket){.fd = -1};
     socket_.address_family = address_family;
     socket_.type = type;
-    socket_.ip_address[0] = 0;
-    socket_.ip_address[CCN_IP6_ADDRESS_LENGTH] = 0;
     socket_.port = 0;
-
     return socket_;
 }
 
-static int32_t __ccn_get_socket_address_and_port(ccn_socket* socket_) {
-    uint32_t socket_address_size = 0;
-    if (socket_->address_family == CCN_AF_IP4) {
-        struct sockaddr_in socket_address_ipv4 = {0};
-        socket_address_size = sizeof(struct sockaddr_in);
-        getsockname(socket_->fd, (struct sockaddr*)&socket_address_ipv4, &socket_address_size);
-        inet_ntop(CCN_AF_IP4, &socket_address_ipv4.sin_addr, socket_->ip_address,
-                  CCN_IP4_ADDRESS_LENGTH);
-        socket_->port = ntohs(socket_address_ipv4.sin_port);
-    } else if (socket_->address_family == CCN_AF_IP6) {
-        struct sockaddr_in6 socket_address_ipv6 = {0};
-        socket_address_size = sizeof(struct sockaddr_in6);
-        getsockname(socket_->fd, (struct sockaddr*)&socket_address_ipv6, &socket_address_size);
-        inet_ntop(CCN_AF_IP6, &socket_address_ipv6.sin6_addr, socket_->ip_address,
-                  CCN_IP6_ADDRESS_LENGTH);
-        socket_->port = ntohs(socket_address_ipv6.sin6_port);
-    } else {
-        return -1;
-    }
-
-    return 0;
-}
-
-static int32_t __ccn_get_sockaddr(struct sockaddr* socket_address, uint32_t* socket_address_size,
-                                  domain address_family, const char* ip_address, uint16_t port) {
-    if (address_family == CCN_AF_IP4) {
-        struct sockaddr_in* socket_address_ipv4 = (struct sockaddr_in*)socket_address;
-        socket_address_ipv4->sin_family = address_family;
-        if (inet_pton(address_family, ip_address, &socket_address_ipv4->sin_addr) <= 0) {
-            return -1;
-        }
-        socket_address_ipv4->sin_port = htons(port);
-        *socket_address_size = sizeof(struct sockaddr_in);
-    } else if (address_family == CCN_AF_IP6) {
-        struct sockaddr_in6* socket_address_ipv6 = (struct sockaddr_in6*)socket_address;
-        socket_address_ipv6->sin6_family = address_family;
-        if (inet_pton(address_family, ip_address, &socket_address_ipv6->sin6_addr) <= 0) {
-            return -1;
-        }
-        socket_address_ipv6->sin6_port = htons(port);
-        *socket_address_size = sizeof(struct sockaddr_in6);
-    } else {
-        return -1;
-    }
-
-    return 0;
-}
-
-static int32_t __ccn_set_client_address_and_port(ccn_socket* client_socket,
-                                                 const struct sockaddr* client_socket_address) {
-    if (client_socket->address_family == CCN_AF_IP4) {
-        inet_ntop(CCN_AF_IP4, &(((struct sockaddr_in*)client_socket_address)->sin_addr),
-                  client_socket->ip_address, CCN_IP4_ADDRESS_LENGTH);
-        client_socket->port = ntohs(((struct sockaddr_in*)client_socket_address)->sin_port);
-    } else if (client_socket->address_family == CCN_AF_IP6) {
-        inet_ntop(CCN_AF_IP6, &(((struct sockaddr_in6*)client_socket_address)->sin6_addr),
-                  client_socket->ip_address, CCN_IP6_ADDRESS_LENGTH);
-        client_socket->port = ntohs(((struct sockaddr_in6*)client_socket_address)->sin6_port);
-    } else
-        return -1;
-
-    return 0;
-}
-
-static int32_t ccn_bind_socket(ccn_socket* socket_, const char* ip_address, uint16_t port) {
+int32_t ccn_bind_socket(ccn_socket* socket_, const char* ip_address, uint16_t port) {
     struct sockaddr socket_address = {0};
     uint32_t socket_address_size = 0;
     int32_t result = __ccn_get_sockaddr(&socket_address, &socket_address_size,
                                         socket_->address_family, ip_address, port);
+    if (result == -1) return -1;
     result = bind(socket_->fd, &socket_address, socket_address_size);
-    if (result == -1) {
-        return -1;
-    }
+    if (result == -1) return -1;
 
-    strncpy(socket_->ip_address, ip_address, sizeof(socket_->ip_address) - 1);
+    __ccn_copy_ip_address(socket_, ip_address, __ccn_ip_address_length(ip_address));
     socket_->port = port;
     return 0;
 }
 
-static ccn_socket ccn_create_server_socket(domain address_family, socket_type type,
-                                           const char* server_ip_address, uint16_t server_port) {
-    ccn_socket server_socket = ccn_create_socket(address_family, type);
-    ccn_bind_socket(&server_socket, server_ip_address, server_port);
+ccn_socket ccn_open_server_socket(domain address_family, socket_type type,
+                                  const char* server_ip_address, uint16_t server_port) {
+    ccn_socket server_socket = ccn_open_socket(address_family, type);
+    int32_t result = ccn_bind_socket(&server_socket, server_ip_address, server_port);
+    if (result == -1) return (ccn_socket){.fd = -1};
+    int32_t option = 1;
+    result = setsockopt(server_socket.fd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
+    if (result == -1) return (ccn_socket){.fd = -1};
     return server_socket;
 }
 
-static int32_t ccn_connect(ccn_socket* socket_, const char* ip_address, uint16_t port) {
+int32_t ccn_connect(ccn_socket* socket_, const char* ip_address, uint16_t port) {
     struct sockaddr socket_address = {0};
     uint32_t socket_address_size = 0;
     int32_t result = __ccn_get_sockaddr(&socket_address, &socket_address_size,
@@ -138,37 +96,123 @@ static int32_t ccn_connect(ccn_socket* socket_, const char* ip_address, uint16_t
     return 0;
 }
 
-static int32_t ccn_listen(ccn_socket* listening_socket, int32_t backlog) {
+int32_t ccn_listen(ccn_socket* listening_socket, int32_t backlog) {
     return listen(listening_socket->fd, backlog);
 }
 
-static ccn_socket ccn_accept_connection(ccn_socket* listening_socket) {
+ccn_socket ccn_accept_connection(ccn_socket* listening_socket) {
     struct sockaddr client_socket_address = {0};
     uint32_t client_socket_address_size = sizeof(struct sockaddr_in);
     if (listening_socket->address_family == CCN_AF_IP6)
         client_socket_address_size = sizeof(struct sockaddr_in6);
     int32_t client_socket_fd =
         accept(listening_socket->fd, &client_socket_address, &client_socket_address_size);
-    ccn_socket client_socket = {.fd = client_socket_fd,
-                                .address_family = listening_socket->address_family,
-                                .type = listening_socket->type,
-                                .port = 0};
-    client_socket.ip_address[0] = 0;
-    client_socket.ip_address[CCN_IP6_ADDRESS_LENGTH] = 0;
+    if (client_socket_fd == -1) return (ccn_socket){.fd = -1};
+    ccn_socket client_socket = {0};
+    client_socket = (ccn_socket){.fd = client_socket_fd,
+                                 .address_family = listening_socket->address_family,
+                                 .type = listening_socket->type,
+                                 .port = 0};
     int32_t result = __ccn_set_client_address_and_port(&client_socket, &client_socket_address);
+    if (result == -1) return (ccn_socket){.fd = -1};
     return client_socket;
 }
 
-static int32_t ccn_close_socket(ccn_socket* socket_) { return close(socket_->fd); }
+int32_t ccn_close_socket(ccn_socket* socket_) { return close(socket_->fd); }
 
-// --------------------------------------------------------------------------------------------------
-
-static int64_t send_data(int32_t socket_fd, void* send_buffer, uint64_t send_buffer_length,
-                         int32_t flags) {
-    return send(socket_fd, send_buffer, send_buffer_length, flags);
+uint32_t __ccn_ip_address_length(const char* ip_address) {
+    uint32_t length = 0;
+    while (*ip_address) {
+        length++;
+        ip_address++;
+    }
+    return length;
 }
 
-static int64_t receive_data(int32_t socket_fd, void* receive_buffer, uint64_t receive_buffer_lenght,
-                            int32_t flags) {
-    return recv(socket_fd, receive_buffer, receive_buffer_lenght, flags);
+void __ccn_copy_ip_address(ccn_socket* socket_, const char* ip_address, uint8_t ip_address_length) {
+    char* ip_address_ptr = socket_->ip_address;
+    for (; ip_address_length > 0; ip_address_length--, ip_address_ptr++, ip_address++)
+        *ip_address_ptr = *ip_address;
+}
+
+int32_t __ccn_get_socket_address_and_port(ccn_socket* socket_) {
+    uint32_t socket_address_size = 0;
+    int32_t result;
+    const char* ntop_result;
+    if (socket_->address_family == CCN_AF_IP4) {
+        struct sockaddr_in socket_address_ipv4 = {0};
+        socket_address_size = sizeof(struct sockaddr_in);
+        result =
+            getsockname(socket_->fd, (struct sockaddr*)&socket_address_ipv4, &socket_address_size);
+        if (result == -1) return -1;
+        ntop_result = inet_ntop(CCN_AF_IP4, &socket_address_ipv4.sin_addr, socket_->ip_address,
+                                CCN_IP4_ADDRESS_LENGTH);
+        if (ntop_result == NULL) return -1;
+        socket_->port = ntohs(socket_address_ipv4.sin_port);
+    } else if (socket_->address_family == CCN_AF_IP6) {
+        struct sockaddr_in6 socket_address_ipv6 = {0};
+        socket_address_size = sizeof(struct sockaddr_in6);
+        result =
+            getsockname(socket_->fd, (struct sockaddr*)&socket_address_ipv6, &socket_address_size);
+        if (result == -1) return -1;
+        ntop_result = inet_ntop(CCN_AF_IP6, &socket_address_ipv6.sin6_addr, socket_->ip_address,
+                                CCN_IP6_ADDRESS_LENGTH);
+        if (ntop_result == NULL) return -1;
+        socket_->port = ntohs(socket_address_ipv6.sin6_port);
+    } else {
+        return -1;
+    }
+
+    return 0;
+}
+
+int32_t __ccn_get_sockaddr(struct sockaddr* socket_address, uint32_t* socket_address_size,
+                           domain address_family, const char* ip_address, uint16_t port) {
+    if (address_family == CCN_AF_IP4) {
+        struct sockaddr_in* socket_address_ipv4 = (struct sockaddr_in*)socket_address;
+        socket_address_ipv4->sin_family = address_family;
+        if (inet_pton(address_family, ip_address, &socket_address_ipv4->sin_addr) <= 0) return -1;
+        socket_address_ipv4->sin_port = htons(port);
+        *socket_address_size = sizeof(struct sockaddr_in);
+    } else if (address_family == CCN_AF_IP6) {
+        struct sockaddr_in6* socket_address_ipv6 = (struct sockaddr_in6*)socket_address;
+        socket_address_ipv6->sin6_family = address_family;
+        if (inet_pton(address_family, ip_address, &socket_address_ipv6->sin6_addr) <= 0) return -1;
+        socket_address_ipv6->sin6_port = htons(port);
+        *socket_address_size = sizeof(struct sockaddr_in6);
+    } else
+        return -1;
+
+    return 0;
+}
+
+int32_t __ccn_set_client_address_and_port(ccn_socket* client_socket,
+                                          const struct sockaddr* client_socket_address) {
+    const char* ntop_result;
+    if (client_socket->address_family == CCN_AF_IP4) {
+        ntop_result =
+            inet_ntop(CCN_AF_IP4, &(((struct sockaddr_in*)client_socket_address)->sin_addr),
+                      client_socket->ip_address, CCN_IP4_ADDRESS_LENGTH);
+        if (ntop_result == NULL) return -1;
+        client_socket->port = ntohs(((struct sockaddr_in*)client_socket_address)->sin_port);
+    } else if (client_socket->address_family == CCN_AF_IP6) {
+        ntop_result =
+            inet_ntop(CCN_AF_IP6, &(((struct sockaddr_in6*)client_socket_address)->sin6_addr),
+                      client_socket->ip_address, CCN_IP6_ADDRESS_LENGTH);
+        if (ntop_result == NULL) return -1;
+        client_socket->port = ntohs(((struct sockaddr_in6*)client_socket_address)->sin6_port);
+    } else
+        return -1;
+
+    return 0;
+}
+
+int64_t ccn_send(ccn_socket* socket_, const void* send_buffer, uint64_t send_buffer_length,
+                 int32_t flags) {
+    return send(socket_->fd, send_buffer, send_buffer_length, flags);
+}
+
+int64_t ccn_receive(ccn_socket* socket_, void* receive_buffer, uint64_t receive_buffer_length,
+                    int32_t flags) {
+    return recv(socket_->fd, receive_buffer, receive_buffer_length, flags);
 }

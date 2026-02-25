@@ -3,9 +3,9 @@
 #include <stdio.h>
 #define BUFFER_LENGTH 4096
 int main() {
-    ccn_socket client_socket = ccn_create_socket(CCN_AF_IP4, CCN_STREAM_SOCKET);
+    ccn_socket client_socket = ccn_open_socket(CCN_AF_IP4, CCN_STREAM_SOCKET);
 
-    printf("Successfully created client socket %d\n", client_socket.fd);
+    printf("Successfully opened client socket %d\n", client_socket.fd);
 
     const char* server_ip_address = "127.0.0.2";
     uint16_t server_port = 3000;
