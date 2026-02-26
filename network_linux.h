@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #define CCN_AF_UNSPECIFIED AF_UNSPEC
@@ -21,19 +22,26 @@ typedef struct ccn_linux_socket {
     socket_type type;
     uint16_t port;
     char ip_address[CCN_IP6_ADDRESS_LENGTH + 2];
+    uint64_t buffer_size;
+    uint64_t buffer_capacity;
+    int8_t buffer[];
 } ccn_socket;
 
-static ccn_socket ccn_open_socket(domain address_family, socket_type type);
+static ccn_socket* ccn_open_socket(domain address_family, socket_type type,
+                                   uint64_t buffer_capacity);
 static int32_t ccn_bind_socket(ccn_socket* socket_, const char* ip_address, uint16_t port);
-static ccn_socket ccn_open_server_socket(domain address_family, socket_type type,
-                                         const char* server_ip_address, uint16_t server_port);
+static ccn_socket* ccn_open_server_socket(domain address_family, socket_type type,
+                                          uint64_t client_buffer_capacity,
+                                          const char* server_ip_address, uint16_t server_port);
 static int32_t ccn_connect(ccn_socket* socket_, const char* ip_address, uint16_t port);
 static int32_t ccn_listen(ccn_socket* listening_socket, int32_t backlog);
-static ccn_socket ccn_accept_connection(ccn_socket* listening_socket);
-static int64_t ccn_send(ccn_socket* socket_, const void* send_buffer, uint64_t send_buffer_length,
-                        int32_t flags);
-static int64_t ccn_receive(ccn_socket* socket_, void* receive_buffer,
-                           uint64_t receive_buffer_length, int32_t flags);
+static ccn_socket* ccn_accept_connection(ccn_socket* listening_socket);
+static int64_t ccn_send_buffer(ccn_socket* send_socket, int32_t flags);
+static int64_t ccn_send_data(ccn_socket* send_socket, const void* data, uint64_t data_length,
+                             int32_t flags);
+static int64_t ccn_receive_buffer(ccn_socket* receive_socket, int32_t flags);
+static int64_t ccn_receive_data(ccn_socket* receive_socket, void* data, uint64_t data_length,
+                                int32_t flags);
 static int32_t ccn_close_socket(ccn_socket* socket_);
 
 static uint32_t __ccn_ip_address_length(const char* ip_address);
@@ -45,14 +53,15 @@ static int32_t __ccn_get_sockaddr(struct sockaddr* socket_address, uint32_t* soc
 static int32_t __ccn_set_client_address_and_port(ccn_socket* client_socket,
                                                  const struct sockaddr* client_socket_address);
 
-ccn_socket ccn_open_socket(domain address_family, socket_type type) {
-    ccn_socket socket_ = {0};
-    socket_.fd = socket(address_family, type, 0);
-    if (socket_.fd == -1) return (ccn_socket){.fd = -1};
-    socket_.address_family = address_family;
-    socket_.type = type;
-    socket_.port = 0;
-    return socket_;
+ccn_socket* ccn_open_socket(domain address_family, socket_type type, uint64_t buffer_capacity) {
+    int32_t new_socket_fd = socket(address_family, type, 0);
+    if (new_socket_fd == -1) return NULL;
+    ccn_socket* new_socket = (ccn_socket*)calloc(1, sizeof(ccn_socket) + buffer_capacity);
+    new_socket->fd = new_socket_fd;
+    new_socket->address_family = address_family;
+    new_socket->type = type;
+    new_socket->buffer_capacity = buffer_capacity;
+    return new_socket;
 }
 
 int32_t ccn_bind_socket(ccn_socket* socket_, const char* ip_address, uint16_t port) {
@@ -69,14 +78,21 @@ int32_t ccn_bind_socket(ccn_socket* socket_, const char* ip_address, uint16_t po
     return 0;
 }
 
-ccn_socket ccn_open_server_socket(domain address_family, socket_type type,
-                                  const char* server_ip_address, uint16_t server_port) {
-    ccn_socket server_socket = ccn_open_socket(address_family, type);
-    int32_t result = ccn_bind_socket(&server_socket, server_ip_address, server_port);
-    if (result == -1) return (ccn_socket){.fd = -1};
+ccn_socket* ccn_open_server_socket(domain address_family, socket_type type,
+                                   uint64_t client_buffer_capacity, const char* server_ip_address,
+                                   uint16_t server_port) {
+    int32_t server_socket_fd = socket(address_family, type, 0);
+    if (server_socket_fd == -1) return NULL;
+    ccn_socket* server_socket = (ccn_socket*)calloc(1, sizeof(ccn_socket));
+    server_socket->fd = server_socket_fd;
+    server_socket->address_family = address_family;
+    server_socket->type = type;
+    server_socket->buffer_capacity = client_buffer_capacity;
+    int32_t result = ccn_bind_socket(server_socket, server_ip_address, server_port);
+    if (result == -1) return NULL;
     int32_t option = 1;
-    result = setsockopt(server_socket.fd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
-    if (result == -1) return (ccn_socket){.fd = -1};
+    result = setsockopt(server_socket->fd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
+    if (result == -1) return NULL;
     return server_socket;
 }
 
@@ -100,25 +116,54 @@ int32_t ccn_listen(ccn_socket* listening_socket, int32_t backlog) {
     return listen(listening_socket->fd, backlog);
 }
 
-ccn_socket ccn_accept_connection(ccn_socket* listening_socket) {
+ccn_socket* ccn_accept_connection(ccn_socket* listening_socket) {
     struct sockaddr client_socket_address = {0};
     uint32_t client_socket_address_size = sizeof(struct sockaddr_in);
     if (listening_socket->address_family == CCN_AF_IP6)
         client_socket_address_size = sizeof(struct sockaddr_in6);
     int32_t client_socket_fd =
         accept(listening_socket->fd, &client_socket_address, &client_socket_address_size);
-    if (client_socket_fd == -1) return (ccn_socket){.fd = -1};
-    ccn_socket client_socket = {0};
-    client_socket = (ccn_socket){.fd = client_socket_fd,
-                                 .address_family = listening_socket->address_family,
-                                 .type = listening_socket->type,
-                                 .port = 0};
-    int32_t result = __ccn_set_client_address_and_port(&client_socket, &client_socket_address);
-    if (result == -1) return (ccn_socket){.fd = -1};
+    if (client_socket_fd == -1) return NULL;
+    ccn_socket* client_socket =
+        (ccn_socket*)calloc(1, sizeof(ccn_socket) + listening_socket->buffer_capacity);
+    client_socket->fd = client_socket_fd;
+    client_socket->address_family = listening_socket->address_family;
+    client_socket->type = listening_socket->type;
+    client_socket->buffer_capacity = listening_socket->buffer_capacity;
+    int32_t result = __ccn_set_client_address_and_port(client_socket, &client_socket_address);
+    if (result == -1) return NULL;
     return client_socket;
 }
 
-int32_t ccn_close_socket(ccn_socket* socket_) { return close(socket_->fd); }
+int64_t ccn_send_buffer(ccn_socket* send_socket, int32_t flags) {
+    return send(send_socket->fd, send_socket->buffer, send_socket->buffer_size, flags);
+}
+
+int64_t ccn_send_data(ccn_socket* send_socket, const void* data, uint64_t data_length,
+                      int32_t flags) {
+    return send(send_socket->fd, data, data_length, flags);
+}
+
+int64_t ccn_receive_buffer(ccn_socket* receive_socket, int32_t flags) {
+    int64_t bytes_received =
+        recv(receive_socket->fd, receive_socket->buffer, receive_socket->buffer_capacity, flags);
+    if (bytes_received == -1) return -1;
+    receive_socket->buffer_size = bytes_received;
+    receive_socket->buffer[bytes_received] = 0;
+    return bytes_received;
+}
+
+int64_t ccn_receive_data(ccn_socket* receive_socket, void* data, uint64_t read_count,
+                         int32_t flags) {
+    return recv(receive_socket->fd, data, read_count, flags);
+}
+
+int32_t ccn_close_socket(ccn_socket* socket_) {
+    int32_t result = close(socket_->fd);
+    if (result == -1) return -1;
+    free(socket_);
+    return 0;
+}
 
 uint32_t __ccn_ip_address_length(const char* ip_address) {
     uint32_t length = 0;
@@ -205,14 +250,4 @@ int32_t __ccn_set_client_address_and_port(ccn_socket* client_socket,
         return -1;
 
     return 0;
-}
-
-int64_t ccn_send(ccn_socket* socket_, const void* send_buffer, uint64_t send_buffer_length,
-                 int32_t flags) {
-    return send(socket_->fd, send_buffer, send_buffer_length, flags);
-}
-
-int64_t ccn_receive(ccn_socket* socket_, void* receive_buffer, uint64_t receive_buffer_length,
-                    int32_t flags) {
-    return recv(socket_->fd, receive_buffer, receive_buffer_length, flags);
 }
